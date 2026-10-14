@@ -22,7 +22,7 @@ It reads every package and running process on **your** phone and rates each pack
 4. Put `HyperDebloat.ps1` and `Run-HyperDebloat.bat` in the same folder and double-click `Run-HyperDebloat.bat`.
 5. The home window opens. Choose an action:
    - **Recommended** shows every green package, all ticked. Untick anything you want to keep and press **Remove selected**.
-   - **Custom** opens the full colour-coded list. Tick what you want and press **Remove selected**. Red packages ask for an extra confirmation.
+   - **Custom** opens the full colour-coded list. Pick a **Category** (Ads & tracking, Google apps, Xiaomi & phone apps...) or type a name to narrow it, tick what you want and press **Remove selected**. Red packages ask for an extra confirmation.
    - **Restore** asks the phone what has been removed or disabled, by this tool or any other (Xiaomi ADB/Fastboot Tools, UAD, plain adb), and puts back what you tick. Removed system apps are reinstalled, disabled apps are re-enabled, and ordinary apps whose file was deleted get their Play Store page opened on the phone.
    - **Rescan phone**, **Open reports folder** and **Quit**.
 
@@ -34,7 +34,7 @@ If ADB is missing, the script offers to download Google's platform-tools for you
 
 ## How ratings are decided
 
-### Step 1: the phone's own evidence
+### Step 1: what depends on it, according to the phone
 
 | Signal (read over ADB) | Effect |
 |---|---|
@@ -44,23 +44,39 @@ If ADB is missing, the script offers to download Google's platform-tools for you
 | Provides location services (network/fused location, geocoding, geofencing) | Red |
 | Another app is using its services or content providers right now | Orange |
 | Active overlay on the Android framework, System UI or Settings | Orange |
-| Runs as a system user (system, phone, bluetooth...) | Orange |
-| Installed with the hardware drivers (`vendor` or `odm` partition) | Orange |
-| Signed with the platform key | soft |
-| Privileged system app | soft |
-| Provides protected permissions to other apps | soft |
-| No app icon (background component) | soft |
+| 5 or more other apps hold permissions it defines | Orange |
+| 1 to 4 other apps hold permissions it defines | Yellow |
+| Installed with the hardware drivers (`vendor` or `odm` partition) | Yellow at least |
 
-No signals means green. One or two soft signals means yellow, three or more means orange.
+No dependency means green. How a package is built (signed with the platform key, privileged, no app icon, running as a system user) is shown in the report for information but does not count against it: on Xiaomi phones nearly every package, junk included, looks like that.
 
 ### Step 2: cross-check with the lists
 
 The lists are [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation), [fadeltd/xiaomi-debloater](https://github.com/fadeltd/xiaomi-debloater) and [ovsky/hyperos-debloater](https://github.com/ovsky/hyperos-debloater), downloaded fresh on every run. If GitHub is unreachable, the last saved copy is used.
 
 - A list rates it higher than the phone does: the rating goes up to the list's rating.
-- The phone sees an independent app (green) but a list says expert or danger: contradiction. The package is flagged grey and never touched.
-- The lists rate it lower: the phone's evidence wins. The one exception is when nothing is using it, no red signal applies, and every list (at least two) says safe; then it drops one step, but never to green.
-- No list knows the package: it is flagged grey and never touched, because nothing says what it does.
+- All three lists say it is junk and nothing red applies: green, or yellow if other apps clearly rely on it or it sits with the hardware drivers.
+- The two lists that know it both say safe and nothing is using it right now: one step lower.
+- Only one list knows it: never green, because it cannot be cross-checked.
+- No list knows it: flagged grey and never touched, because nothing says what it does.
+
+Recommended ticks green background components automatically. Green apps with an icon (Gmail, YouTube, Calculator...) are listed but not ticked, because you may use them.
+Before anything is removed, the confirmation names every ticked app that has an icon on the home screen.
+
+### Categories
+
+Each package also gets a category from its name, its list description, whether it has an app icon and where it is installed. Categories only help you find things; they do not change the rating.
+
+| Category | What it holds |
+|---|---|
+| Ads & tracking | Ad, telemetry and usage-data services (MSA, Analytics, Daemon, Quick Apps, Facebook stubs) |
+| Google apps / Google services | Google apps with an icon / Google background services |
+| Xiaomi & phone apps | Other apps with an icon (Notes, Calendar, Scanner, GetApps, Themes...) |
+| Xiaomi services | Xiaomi background services |
+| Android system | Android background components |
+| Themes & overlays | Colour, icon, navigation-bar and resource overlays |
+| Hardware & drivers | Chipset, fingerprint and factory test packages, and anything on the `vendor`/`odm` partition |
+| Third-party preloads | Preinstalled apps from other companies |
 
 ## Limits
 
@@ -78,7 +94,7 @@ The lists are [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal
 
 ## Credits
 
-Made by **KayYesR**, perfected by **Claude** (Anthropic, Claude Opus 5.5).
+Made by **kayyesr**, perfected by **Claude** (Anthropic, Claude Opus 5.5).
 
 Package descriptions and cross-check data come from the [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation), [fadeltd/xiaomi-debloater](https://github.com/fadeltd/xiaomi-debloater) and [ovsky/hyperos-debloater](https://github.com/ovsky/hyperos-debloater) projects and their contributors. The lists are downloaded at run time and are not included in this repository.
 

@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.4.2'
+$Script:Version = '0.6.0'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -262,7 +262,7 @@ function Build-Index($Lists) {
     $idx = @{ uad = @{}; fadeltd = @{}; ovsky = @{}; ovskyDesc = @{} }
     $uadMap = @{ Recommended = 1; Advanced = 2; Expert = 3; Unsafe = 4 }
     $fadMap = @{ safe = 1; caution = 2; danger = 4 }
-    $ovsMap = @{ phase1_safe = 1; phase2_advanced = 2; phase3_risky = 3; phase4_hidden = 3; restore_only = 4 }
+    $ovsMap = @{ phase1_safe = 1; phase2_advanced = 1; phase3_risky = 3; phase4_hidden = 3; restore_only = 4 }   # phase 2 = ordinary user-facing apps
 
     if ($Lists['uad']) {
         $u = $Lists['uad']
@@ -338,6 +338,7 @@ function New-Facts {
         Partition = ''; Signature = ''; PlatformSigned = $false; HasIcon = $false
         SigPerms = (New-Object System.Collections.Generic.List[string])
         UsedBy = (New-Object System.Collections.Generic.List[string])
+        PermHolders = (New-Object System.Collections.Generic.List[string])
         OverlayTarget = ''; OverlayState = ''
         Roles = (New-Object System.Collections.Generic.List[string])
         Running = $false
@@ -352,17 +353,18 @@ function Get-DeviceFacts([hashtable]$Installed) {
 
     # 1. Package manager dump: partition, privileged, persistent, identity, signature, permissions.
     Write-Info 'Reading package details...'
-    $cur = $null; $inPk = $false; $declIndent = -1
+    $cur = $null; $inPk = $false; $permMode = ''; $permIndent = -1
     $androidSig = ''
+    $granted = @{}   # package -> permissions granted to it (install + runtime)
     foreach ($line in (Invoke-Shell 'dumpsys package packages')) {
         if ($line -match '^\S') {
             $inPk = ($line -match '^(Packages|Hidden system packages):')
-            $cur = $null; $declIndent = -1
+            $cur = $null; $permMode = ''
             continue
         }
         if (-not $inPk) { continue }
         if ($line -match '^\s*Package \[([^\]]+)\]') {
-            $cur = $Matches[1]; $declIndent = -1
+            $cur = $Matches[1]; $permMode = ''
             if ($facts.ContainsKey($cur)) { $facts[$cur].Seen = $true }
             continue
         }
@@ -370,14 +372,23 @@ function Get-DeviceFacts([hashtable]$Installed) {
         $f = F $cur
         $indent = $line.Length - $line.TrimStart().Length
 
-        if ($declIndent -ge 0) {
-            if ($indent -gt $declIndent) {
-                if ($f -and $line -match '^\s*([\w\.]+):\s*prot=(\S+)' -and $Matches[2] -match 'signature') { AddUnique $f.SigPerms $Matches[1] }
+        if ($permMode) {
+            if ($indent -gt $permIndent) {
+                if ($permMode -eq 'declared') {
+                    if ($f -and $line -match '^\s*([\w\.]+):\s*prot=(\S+)') {
+                        $permName = $Matches[1]; $prot = $Matches[2]   # save before the next -match overwrites $Matches
+                        if ($prot -match 'signature') { AddUnique $f.SigPerms $permName }
+                    }
+                }
+                elseif ($line -match '^\s*([\w\.]+):\s*granted=true') {
+                    if (-not $granted.ContainsKey($cur)) { $granted[$cur] = New-Object System.Collections.Generic.HashSet[string] }
+                    [void]$granted[$cur].Add($Matches[1])
+                }
                 continue
             }
-            $declIndent = -1
+            $permMode = ''
         }
-        if ($line -match '^\s*declared permissions:') { $declIndent = $indent; continue }
+        if ($line -match '^\s*(declared|install|runtime) permissions:') { $permMode = $Matches[1]; $permIndent = $indent; continue }
 
         if ($line -match '^\s*signatures=PackageSignatures\{.*?signatures:\[([^\]]*)\]') {
             if ($cur -eq 'android' -and -not $androidSig) { $androidSig = $Matches[1] }
@@ -407,6 +418,19 @@ function Get-DeviceFacts([hashtable]$Installed) {
         foreach ($p in $facts.Keys) { if ($facts[$p].Signature -eq $androidSig -and $p -ne 'android') { $facts[$p].PlatformSigned = $true } }
     }
     else { Write-Warn 'Could not read the platform signature; that check is skipped.' }
+    # Real permission dependency: other installed apps that hold a protected permission this package defines.
+    $owner = @{}
+    foreach ($p in $facts.Keys) { foreach ($perm in $facts[$p].SigPerms) { $owner[$perm] = $p } }
+    foreach ($holder in $granted.Keys) {
+        if (-not $facts.ContainsKey($holder)) { continue }
+        foreach ($perm in $granted[$holder]) {
+            $o = $owner[$perm]
+            if (-not $o -or $o -eq $holder) { continue }
+            $hs = $facts[$holder].SharedUser
+            if ($hs -and $hs -eq $facts[$o].SharedUser) { continue }
+            AddUnique $facts[$o].PermHolders $holder
+        }
+    }
 
     # 2. Which packages have an app icon (a launcher entry) - i.e. are user-facing apps.
     Write-Info 'Reading app icons...'
@@ -482,49 +506,65 @@ function Get-DeviceFacts([hashtable]$Installed) {
 # Rule-based classifier
 # ----------------------------------------------------------------------------------------------
 function Get-PhoneVerdict($f, [bool]$IsSystem) {
-    # Hard signals (RED): Android itself depends on this package right now.
-    $hard = New-Object System.Collections.Generic.List[string]
-    # Strong signals (ORANGE): something uses it now, or it runs with system-level power.
-    $live = New-Object System.Collections.Generic.List[string]
-    # Soft signals (YELLOW, or ORANGE at 3+): it looks like part of the system, not an independent app.
-    $soft = New-Object System.Collections.Generic.List[string]
+    # Only real dependencies affect the rating. How a package is built or signed (platform key,
+    # privileged, no icon, system user) is shown for information but does not count against it:
+    # on Xiaomi phones nearly every package, junk included, looks like that.
+    $hard = New-Object System.Collections.Generic.List[string]   # RED: Android itself relies on it
+    $dep  = New-Object System.Collections.Generic.List[string]   # something relies on it
+    $info = New-Object System.Collections.Generic.List[string]   # context only
+    $strong = $false
 
     if ($f.Persistent) { $hard.Add('persistent (Android keeps it running)') }
     foreach ($r in $f.Roles) { $hard.Add($r) }
 
-    # Running as a system user gives a package system-level power, but on its own it does not mean
-    # anything depends on it (test and log tools often run this way), so it is a strong signal, not hard.
-    if ($f.SharedUser -match '^android\.uid\.') { $live.Add("runs as the system user $($f.SharedUser)") }
-    elseif ($null -ne $f.AppId -and $f.AppId -lt 10000) { $live.Add("runs with a system user ID ($($f.AppId))") }
-    if ($f.Partition -in @('vendor', 'odm')) { $live.Add("installed with the hardware drivers ($($f.Partition) partition)") }
-
     if ($f.UsedBy.Count -gt 0) {
         $shown = @($f.UsedBy | Select-Object -First 3) -join ', '
         $more = if ($f.UsedBy.Count -gt 3) { " +$($f.UsedBy.Count - 3) more" } else { '' }
-        $live.Add("in use by: $shown$more")
+        $dep.Add("in use right now by: $shown$more"); $strong = $true
     }
     if ($f.OverlayTarget -and $f.OverlayState -eq 'enabled' -and $f.OverlayTarget -in @('android', 'com.android.systemui', 'com.android.settings')) {
-        $live.Add("active overlay on $($f.OverlayTarget)")
+        $dep.Add("active overlay on $($f.OverlayTarget)"); $strong = $true
     }
-    elseif ($f.OverlayTarget) { $soft.Add("overlay for $($f.OverlayTarget)") }
+    if ($f.PermHolders.Count -gt 0) {
+        $shown = @($f.PermHolders | Select-Object -First 3) -join ', '
+        $more = if ($f.PermHolders.Count -gt 3) { " +$($f.PermHolders.Count - 3) more" } else { '' }
+        $dep.Add("$($f.PermHolders.Count) app(s) hold its permissions: $shown$more")
+        if ($f.PermHolders.Count -ge 5) { $strong = $true }
+    }
 
+    if ($f.SharedUser -match '^android\.uid\.') { $info.Add("runs as $($f.SharedUser)") }
+    # Installed with the hardware drivers: never rated green, even if nothing visibly depends on it.
+    if ($f.Partition -in @('vendor', 'odm')) { $dep.Add("installed with the hardware drivers ($($f.Partition) partition)") }
     if ($IsSystem) {
-        if ($f.PlatformSigned) { $soft.Add('signed with the platform key') }
-        if ($f.Privileged) { $soft.Add('privileged system app') }
-        if ($f.SigPerms.Count -gt 0) { $soft.Add('provides protected permissions to other apps') }
-        if (-not $f.HasIcon) { $soft.Add('no app icon (background component)') }
+        if ($f.PlatformSigned) { $info.Add('platform-signed') }
+        if ($f.Privileged) { $info.Add('privileged') }
+        if (-not $f.HasIcon) { $info.Add('no app icon') }
     }
 
-    if ($hard.Count -gt 0)     { $tier = 4 }
-    elseif ($live.Count -gt 0) { $tier = 3 }
-    elseif ($soft.Count -ge 3) { $tier = 3 }
-    elseif ($soft.Count -ge 1) { $tier = 2 }
+    if ($hard.Count -gt 0)  { $tier = 4 }
+    elseif ($strong)        { $tier = 3 }
+    elseif ($dep.Count -gt 0) { $tier = 2 }
     else { $tier = 1 }
 
-    $why = @($hard) + @($live) + @($soft)
-    if ($why.Count -eq 0) { $why = @('independent app: has an icon, nothing depends on it') }
-    $inUse = ($f.UsedBy.Count -gt 0) -or ($f.OverlayTarget -and $f.OverlayState -eq 'enabled')
-    return @{ Tier = $tier; Why = ($why -join '; '); HasHard = ($hard.Count -gt 0); InUse = [bool]$inUse }
+    $why = @($hard) + @($dep)
+    if ($why.Count -eq 0) { $why = @('nothing depends on it') }
+    $text = ($why -join '; ') + $(if ($info.Count) { "  [info: $($info -join ', ')]" } else { '' })
+    return @{ Tier = $tier; Why = $text; HasHard = ($hard.Count -gt 0); InUse = ($f.UsedBy.Count -gt 0); Strong = $strong
+              Hardware = ($f.Partition -in @('vendor', 'odm')); HasIcon = [bool]$f.HasIcon }
+}
+
+function Get-Category([string]$Pkg, [string]$Desc, [bool]$Icon, [string]$Partition) {
+    # A plain label for what kind of package this is. It helps people find things; it does not change the rating.
+    if ($Pkg -match '^(com\.miui\.(msa|analytics|daemon|bugreport|hybrid|systemAdSolution|contentcatcher)|com\.miui\.android\.fashiongallery|com\.mfashiongallery|com\.glance|com\.facebook\.(appmanager|services|system))(\.|$)' -or
+        $Desc -match '(?i)telemetry|ad-serving|advertis|collects usage data') { return 'Ads & tracking' }
+    $xiaomiOrAndroid = '^(android|com\.android|com\.google|com\.miui|com\.xiaomi|com\.mi|com\.mipay|miui|com\.lbe|com\.fido|com\.milink|com\.duokan|org\.chromium|org\.ifaa|cn\.wps|com\.unionpay|com\.gallery|com\.qualcomm|com\.qti|org\.codeaurora|vendor|com\.mediatek|com\.mtk|com\.fingerprints|com\.goodix|com\.huaqin|com\.tencent\.soter|com\.debug|com\.wapi|com\.wdstechnology|com\.example)(\.|$)'
+    if ($Pkg -notmatch $xiaomiOrAndroid) { return 'Third-party preloads' }
+    if ($Pkg -match '(^|\.)(overlay|theme|icon_pack|navbar|cutout)(\.|$)|overlay$') { return 'Themes & overlays' }
+    if ($Partition -in @('vendor', 'odm') -or $Pkg -match '^(com\.qualcomm|com\.qti|org\.codeaurora|vendor|com\.mediatek|com\.mtk|com\.fingerprints|com\.goodix|com\.huaqin|com\.tencent\.soter|com\.debug|com\.wapi)(\.|$)') { return 'Hardware & drivers' }
+    if ($Pkg -match '^com\.google\.|^com\.android\.(vending|chrome)$') { if ($Icon) { return 'Google apps' } else { return 'Google services' } }
+    if ($Icon) { return 'Xiaomi & phone apps' }
+    if ($Pkg -match '^(android|com\.android)(\.|$)') { return 'Android system' }
+    return 'Xiaomi services'
 }
 
 function Get-Rating([string]$Pkg, [bool]$IsSystem, $Idx, $Facts) {
@@ -558,28 +598,39 @@ function Get-Rating([string]$Pkg, [bool]$IsSystem, $Idx, $Facts) {
     if ($src.Count -gt 0) {
         $tiers = @($src.Values | ForEach-Object { $_.Tier })
         $listMax = [int](($tiers | Measure-Object -Maximum).Maximum)
-        $unanimousSafe = ($src.Count -ge 2) -and (@($tiers | Where-Object { $_ -ne 1 }).Count -eq 0)
+        $allSafe = (@($tiers | Where-Object { $_ -ne 1 }).Count -eq 0)
 
-        if ($tier -eq 1 -and $listMax -ge 3) {
-            # The phone sees an independent app, but a list says removing it is dangerous. That
-            # contradiction means something is not understood, so the package is left alone.
-            $tier = 0
-            $notes.Add("but a list rates it $($Script:TierInfo[$listMax].Colour) - contradiction, flagged and not touched")
-        }
-        elseif ($listMax -gt $tier) {
+        if ($listMax -gt $tier) {
             $tier = $listMax
             $notes.Add("raised to $($Script:TierInfo[$tier].Colour): a list warns about it")
         }
-        elseif ($listMax -lt $tier -and -not $pv.HasHard -and -not $pv.InUse -and $unanimousSafe -and $tier -ge 3) {
-            $tier = $tier - 1
-            $notes.Add("lowered to $($Script:TierInfo[$tier].Colour): all lists agree it is safe and nothing is using it")
+        elseif ($allSafe -and -not $pv.HasHard -and $tier -gt 1) {
+            if ($src.Count -ge 3) {
+                if ($pv.Strong -or $pv.Hardware) {
+                    $tier = 2
+                    $notes.Add('lowered to YELLOW: all three lists say junk, but other apps rely on it, so something may stop working')
+                }
+                else {
+                    $tier = 1
+                    $notes.Add('lowered to GREEN: all three lists agree it is junk and Android does not rely on it')
+                }
+            }
+            elseif ($src.Count -eq 2 -and -not $pv.InUse -and -not ($pv.Hardware -and $tier -le 2)) {
+                $tier = $tier - 1
+                $notes.Add("lowered to $($Script:TierInfo[$tier].Colour): both lists that know it say safe")
+            }
+            else { $notes.Add('lists rate it lower; the phone''s evidence wins') }
         }
         elseif ($listMax -lt $tier) {
             $notes.Add('lists rate it lower; the phone''s evidence wins')
         }
+        if ($tier -eq 1 -and $src.Count -lt 2) {
+            $tier = 2
+            $notes.Add('raised to YELLOW: only one list knows it, so it cannot be cross-checked')
+        }
     }
     elseif ($Script:ListsLoaded) {
-        # Unknown to every list: the scan can say how system-like it is, but not what it does.
+        # Unknown to every list: the scan can say what depends on it, but not what it does.
         $tier = 0
         $notes.Add('not in any list - unknown package, flagged and not touched')
     }
@@ -597,6 +648,8 @@ function Get-Rating([string]$Pkg, [bool]$IsSystem, $Idx, $Facts) {
         Lists       = $listsSay
         Reason      = ($notes -join '; ')
         Facts       = $f
+        UserApp     = [bool]$pv.HasIcon
+        Category    = Get-Category $Pkg $desc ([bool]$pv.HasIcon) $(if ($f) { [string]$f.Partition } else { '' })
     }
 }
 
@@ -605,13 +658,13 @@ function Get-Classification($Idx, $Sets, $Facts) {
         Get-Rating -Pkg $p -IsSystem $Sets.System.ContainsKey($p) -Idx $Idx -Facts $Facts
     }
     $order = @{ 1 = 1; 2 = 2; 3 = 3; 4 = 4; 0 = 5 }
-    return @($rows | Where-Object { $_ } | Sort-Object @{ Expression = { $order[[int]$_.Tier] } }, Package)
+    return @($rows | Where-Object { $_ } | Sort-Object @{ Expression = { $order[[int]$_.Tier] } }, Category, Package)
 }
 
 # ----------------------------------------------------------------------------------------------
 # Selection UI
 # ----------------------------------------------------------------------------------------------
-function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [string]$Legend = '') {
+function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '') {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
@@ -627,11 +680,23 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     $legendLabel = New-Object Windows.Forms.Label
     $legendLabel.AutoSize = $false; $legendLabel.Dock = 'Fill'
     $legendText = if ($Legend) { $Legend } else { 'GREEN = safe  |  YELLOW = a minor feature may break  |  ORANGE = a notable/core feature may break  |  RED = can stop the phone booting  |  GREY = flagged, cannot be selected' }
-    $legendLabel.Text = "$legendText`r`nClick a row to tick or untick it, then press '$ActionText'. Type in the box below to filter."
+    $legendLabel.Text = "$legendText`r`nClick a row to tick or untick it, then press '$ActionText'. Pick a category or type a name below to narrow the list."
     $legendLabel.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 0)
-    $filter = New-Object Windows.Forms.TextBox
-    $filter.Dock = 'Bottom'
-    $top.Controls.Add($legendLabel); $top.Controls.Add($filter)
+    $filterBar = New-Object Windows.Forms.FlowLayoutPanel
+    $filterBar.Dock = 'Bottom'; $filterBar.Height = 30; $filterBar.WrapContents = $false
+    $catLabel = New-Object Windows.Forms.Label; $catLabel.Text = 'Category:'; $catLabel.AutoSize = $true; $catLabel.Padding = New-Object Windows.Forms.Padding(4, 6, 0, 0)
+    $catBox = New-Object Windows.Forms.ComboBox; $catBox.DropDownStyle = 'DropDownList'; $catBox.Width = 230
+    [void]$catBox.Items.Add('All categories')
+    foreach ($c in @($Items | ForEach-Object { $_.Category } | Where-Object { $_ } | Sort-Object -Unique)) {
+        $n = @($Items | Where-Object { $_.Category -eq $c }).Count
+        [void]$catBox.Items.Add("$c ($n)")
+    }
+    $catBox.SelectedIndex = 0
+    $searchLabel = New-Object Windows.Forms.Label; $searchLabel.Text = 'Search:'; $searchLabel.AutoSize = $true; $searchLabel.Padding = New-Object Windows.Forms.Padding(16, 6, 0, 0)
+    $filter = New-Object Windows.Forms.TextBox; $filter.Width = 400
+    $filterBar.Controls.AddRange(@($catLabel, $catBox, $searchLabel, $filter))
+    $top.Height = 80
+    $top.Controls.Add($legendLabel); $top.Controls.Add($filterBar)
 
     $grid = New-Object Windows.Forms.DataGridView
     $grid.Dock = 'Fill'
@@ -644,7 +709,7 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     $chk = New-Object Windows.Forms.DataGridViewCheckBoxColumn
     $chk.Name = 'Sel'; $chk.HeaderText = 'Pick'; $chk.Width = 45
     [void]$grid.Columns.Add($chk)
-    $cols = @(@('Risk', 80), @('Package', 260), @('What it does', 330), @('Phone says', 330), @('Lists say', 190), @('Final reasoning', 300))
+    $cols = @(@('Risk', 80), @('Category', 150), @('Package', 260), @('What it does', 330), @('Phone says', 330), @('Lists say', 190), @('Final reasoning', 300))
     foreach ($c in $cols) {
         $col = New-Object Windows.Forms.DataGridViewTextBoxColumn
         $col.Name = $c[0]; $col.HeaderText = $c[0]; $col.Width = $c[1]; $col.ReadOnly = $true
@@ -652,8 +717,8 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     }
 
     foreach ($it in $Items) {
-        $pick = ($PreselectAll -or ($PreselectSafe -and $it.Tier -eq 1)) -and $it.Tier -ne 0
-        $i = $grid.Rows.Add($pick, $it.Risk, $it.Package, $it.Description, $it.Phone, $it.Lists, $it.Reason)
+        $pick = ($PreselectAll -or ($PreselectSafe -and $it.Tier -eq 1) -or ($PreselectBackground -and $it.Tier -eq 1 -and -not $it.UserApp)) -and $it.Tier -ne 0
+        $i = $grid.Rows.Add($pick, $it.Risk, $it.Category, $it.Package, $it.Description, $it.Phone, $it.Lists, $it.Reason)
         $row = $grid.Rows[$i]
         $row.Tag = $it
         $row.DefaultCellStyle.BackColor = [Drawing.ColorTranslator]::FromHtml($Script:TierInfo[[int]$it.Tier].Hex)
@@ -690,14 +755,18 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     })
     $btnSafe.Add_Click({ foreach ($r in $grid.Rows) { if ($r.Tag.Tier -eq 1) { $r.Cells['Sel'].Value = $true } }; & $updateCount })
     $btnClear.Add_Click({ foreach ($r in $grid.Rows) { $r.Cells['Sel'].Value = $false }; & $updateCount })
-    $filter.Add_TextChanged({
+    $applyFilter = {
         $t = $filter.Text.Trim()
+        $cat = if ($catBox.SelectedIndex -le 0) { '' } else { ([string]$catBox.SelectedItem -replace '\s\(\d+\)$', '') }
         $grid.CurrentCell = $null
         foreach ($r in $grid.Rows) {
             $it = $r.Tag
-            $r.Visible = (-not $t) -or ($it.Package -like "*$t*") -or ($it.Description -like "*$t*") -or ($it.Risk -like "*$t*")
+            $textOk = (-not $t) -or ($it.Package -like "*$t*") -or ($it.Description -like "*$t*") -or ($it.Risk -like "*$t*") -or ($it.Category -like "*$t*")
+            $r.Visible = $textOk -and ((-not $cat) -or $it.Category -eq $cat)
         }
-    })
+    }
+    $filter.Add_TextChanged($applyFilter)
+    $catBox.Add_SelectedIndexChanged($applyFilter)
 
     $Script:GridResult = @()
     $btnGo.Add_Click({
@@ -725,7 +794,7 @@ function Select-InConsole($Items, [string]$ActionText) {
     $pickable = @($Items | Where-Object { $_.Tier -ne 0 })
     for ($i = 0; $i -lt $pickable.Count; $i++) {
         $it = $pickable[$i]
-        Write-Host ('{0,4}  {1,-9} {2,-45} {3}' -f ($i + 1), $it.Risk, $it.Package, $it.Description) -ForegroundColor $Script:TierInfo[[int]$it.Tier].Console
+        Write-Host ('{0,4}  {1,-9} {2,-22} {3,-45} {4}' -f ($i + 1), $it.Risk, $it.Category, $it.Package, $it.Description) -ForegroundColor $Script:TierInfo[[int]$it.Tier].Console
     }
     Write-Host ''
     $ans = Read-Host "Numbers to $ActionText (e.g. 1,4,7-12), G = all GREEN, A = all, Enter = nothing"
@@ -741,8 +810,20 @@ function Select-InConsole($Items, [string]$ActionText) {
     return , @($set.Keys | Sort-Object | Where-Object { $_ -ge 1 -and $_ -le $pickable.Count } | ForEach-Object { $pickable[$_ - 1] })
 }
 
-function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [string]$Legend = '') {
-    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -Legend $Legend }
+function Get-IconAppNote($Items) {
+    # Names any ticked app that has an icon on the home screen, so nothing the user sees daily goes by accident.
+    $apps = @($Items | Where-Object { $_.UserApp } | ForEach-Object { $_.Package })
+    if ($apps.Count -eq 0) { return '' }
+    return "`n`nThese $($apps.Count) are apps with an icon on your home screen (you may use them):`n  " + ($apps -join "`n  ") + "`n`nPress No and untick them if you want to keep them."
+}
+
+function ConvertTo-FlatList($Value) {
+    # Selections come back as a list; this guarantees a flat list of rows whatever the nesting.
+    return , @($Value | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
+}
+
+function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '') {
+    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -PreselectBackground:$PreselectBackground -Legend $Legend }
     return Select-InConsole -Items $Items -ActionText $ActionText
 }
 
@@ -764,17 +845,18 @@ function Save-Report($Rows, $Dev, [string]$DeviceDir) {
     $Rows | ForEach-Object {
         $f = $_.Facts
         [pscustomobject]@{
-            Risk = $_.Risk; Package = $_.Package; Description = $_.Description
+            Risk = $_.Risk; Category = $_.Category; Package = $_.Package; Description = $_.Description
             PhoneSays = $_.Phone; ListsSay = $_.Lists; FinalReasoning = $_.Reason
             Partition = $(if ($f) { $f.Partition }); Privileged = $(if ($f) { $f.Privileged }); PlatformSigned = $(if ($f) { $f.PlatformSigned })
             HasIcon = $(if ($f) { $f.HasIcon }); Persistent = $(if ($f) { $f.Persistent }); AppId = $(if ($f) { $f.AppId })
-            UsedBy = $(if ($f) { $f.UsedBy -join ' ' }); Running = $(if ($f) { $f.Running })
+            UsedBy = $(if ($f) { $f.UsedBy -join ' ' }); PermHolders = $(if ($f) { $f.PermHolders -join ' ' }); Running = $(if ($f) { $f.Running })
         }
     } | ConvertTo-Csv -NoTypeInformation | Add-Content -Path $report -Encoding UTF8
     Write-Info "Full report: $report"
 }
 
 function Remove-Packages($Items, [string]$DeviceDir) {
+    $Items = ConvertTo-FlatList $Items
     $log = Join-Path $DeviceDir ("removed_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
     $results = New-Object System.Collections.Generic.List[object]
     $i = 0
@@ -818,17 +900,25 @@ function Invoke-Recommended($Rows, [string]$DeviceDir) {
     foreach ($it in $green) { Write-Host ('  {0,-50} {1}' -f $it.Package, $it.Description) -ForegroundColor Green }
     $flagged = @($Rows | Where-Object { $_.Tier -eq 0 }).Count
     if ($flagged) { Write-Info "$flagged packages were flagged (phone and lists disagree, or no data) and will not be touched. See the report." }
+    $apps = @($green | Where-Object { $_.UserApp })
     if ($Script:Gui) {
-        $green = @(Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectAll)
+        $legend = "All of these are GREEN: removing them breaks nothing else. Background junk is ticked. Apps with an icon (you may use them) are NOT ticked - tick any you don't want."
+        $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend)
         if ($green.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
     }
-    if (-not (Read-YesNo "Remove $($green.Count) GREEN package(s)?" $false)) { Write-Info 'Cancelled. Nothing was removed.'; return }
+    else {
+        # Console: remove background junk only; user-facing apps are left for Custom.
+        if ($apps.Count) { Write-Info "Not included (apps with an icon you may use - pick them in Custom): $(($apps | ForEach-Object { $_.Package }) -join ', ')" }
+        $green = @($green | Where-Object { -not $_.UserApp })
+        if ($green.Count -eq 0) { Write-Info 'No background junk rated GREEN.'; return }
+    }
+    if (-not (Read-YesNo "Remove $($green.Count) GREEN package(s)?$(Get-IconAppNote $green)" $false)) { Write-Info 'Cancelled. Nothing was removed.'; return }
     Remove-Packages -Items $green -DeviceDir $DeviceDir
 }
 
 function Invoke-Custom($Rows, [string]$DeviceDir) {
     Write-Step 'Custom: opening the list'
-    $picked = Select-Packages -Items $Rows -Title 'HyperDebloat - Custom' -ActionText 'Remove selected' -PreselectSafe
+    $picked = ConvertTo-FlatList (Select-Packages -Items $Rows -Title 'HyperDebloat - Custom' -ActionText 'Remove selected' -PreselectSafe)
     if ($picked.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
 
     $red = @($picked | Where-Object { $_.Tier -eq 4 })
@@ -848,7 +938,7 @@ function Invoke-Custom($Rows, [string]$DeviceDir) {
     if ($picked.Count -eq 0) { Write-Info 'Nothing left to remove.'; return }
 
     $byTier = $picked | Group-Object Risk | ForEach-Object { "$($_.Count) $($_.Name)" }
-    if (-not (Read-YesNo "Remove $($picked.Count) packages ($($byTier -join ', '))?" $false)) { Write-Info 'Cancelled. Nothing was removed.'; return }
+    if (-not (Read-YesNo "Remove $($picked.Count) packages ($($byTier -join ', '))?$(Get-IconAppNote $picked)" $false)) { Write-Info 'Cancelled. Nothing was removed.'; return }
     Remove-Packages -Items $picked -DeviceDir $DeviceDir
 }
 
@@ -929,7 +1019,7 @@ function Invoke-Restore([string]$Model) {
     $nS = @($items | Where-Object { $_.Action -eq 'store' }).Count
     $nE = @($items | Where-Object { $_.Action -eq 'enable' }).Count
     Write-Step "Restore: $nR removed system apps, $nE disabled apps, $nS ordinary apps (Play Store)"
-    $picked = Select-Packages -Items $items -Title 'HyperDebloat - Restore' -ActionText 'Restore selected' -Legend 'GREEN = RESTORE (removed system app, comes straight back) or RE-ENABLE (disabled app)  |  YELLOW = PLAY STORE (ordinary app, its Play Store page opens on the phone)'
+    $picked = ConvertTo-FlatList (Select-Packages -Items $items -Title 'HyperDebloat - Restore' -ActionText 'Restore selected' -Legend 'GREEN = RESTORE (removed system app, comes straight back) or RE-ENABLE (disabled app)  |  YELLOW = PLAY STORE (ordinary app, its Play Store page opens on the phone)')
     if ($picked.Count -eq 0) { Write-Info 'Nothing selected.'; return }
     if (-not (Read-YesNo "Restore $($picked.Count) packages?" $true)) { return }
     $lost = New-Object System.Collections.Generic.List[string]
@@ -1059,7 +1149,8 @@ function Read-ConsoleMenu {
     Write-Host '  3  Restore      - put back anything removed or disabled (by this or any tool)'
     Write-Host '  R  Rescan the phone'
     Write-Host '  Q  Quit'
-    switch -Regex (Read-Host 'Choose') {
+    $ans = [string](Read-Host 'Choose')   # [string] so end-of-input ($null) counts as Quit
+    switch -Regex ($ans) {
         '^1' { return 'Recommended' }
         '^2' { return 'Custom' }
         '^3' { return 'Restore' }
