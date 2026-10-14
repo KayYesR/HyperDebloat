@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.0'
+$Script:Version = '0.6.1'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -664,7 +664,7 @@ function Get-Classification($Idx, $Sets, $Facts) {
 # ----------------------------------------------------------------------------------------------
 # Selection UI
 # ----------------------------------------------------------------------------------------------
-function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '') {
+function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '') {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
@@ -764,6 +764,14 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
             $textOk = (-not $t) -or ($it.Package -like "*$t*") -or ($it.Description -like "*$t*") -or ($it.Risk -like "*$t*") -or ($it.Category -like "*$t*")
             $r.Visible = $textOk -and ((-not $cat) -or $it.Category -eq $cat)
         }
+        $shown = 0
+        foreach ($r in $grid.Rows) { if ($r.Visible) { $shown++ } }
+        if ($shown -eq 0) {
+            $hint = if ($NoMatchHint) { $NoMatchHint } else { 'Already-removed packages are under Restore; ordinary apps are not listed.' }
+            $count.ForeColor = [Drawing.Color]::Firebrick
+            $count.Text = "No match for '$t'. $hint"
+        }
+        else { $count.ForeColor = [Drawing.SystemColors]::ControlText; & $updateCount }
     }
     $filter.Add_TextChanged($applyFilter)
     $catBox.Add_SelectedIndexChanged($applyFilter)
@@ -822,8 +830,8 @@ function ConvertTo-FlatList($Value) {
     return , @($Value | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
 }
 
-function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '') {
-    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -PreselectBackground:$PreselectBackground -Legend $Legend }
+function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '') {
+    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -PreselectBackground:$PreselectBackground -Legend $Legend -NoMatchHint $NoMatchHint }
     return Select-InConsole -Items $Items -ActionText $ActionText
 }
 
@@ -903,7 +911,7 @@ function Invoke-Recommended($Rows, [string]$DeviceDir) {
     $apps = @($green | Where-Object { $_.UserApp })
     if ($Script:Gui) {
         $legend = "All of these are GREEN: removing them breaks nothing else. Background junk is ticked. Apps with an icon (you may use them) are NOT ticked - tick any you don't want."
-        $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend)
+        $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend -NoMatchHint 'Recommended shows GREEN only. Go Back > Custom to search everything.')
         if ($green.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
     }
     else {
