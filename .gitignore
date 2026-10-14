@@ -1,0 +1,9 @@
+# Local run output
+output/
+*.log
+error_log.txt
+raw_adb_output.txt
+report_*.csv
+removed_*.csv
+platform-tools/
+cache/
