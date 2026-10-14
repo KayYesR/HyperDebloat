@@ -78,7 +78,7 @@ The lists are [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal
 
 ## Credits
 
-Made by **kayyesr**, perfected by **Claude** (Anthropic, Claude Opus 5.5).
+Made by **KayYesR**, perfected by **Claude** (Anthropic, Claude Opus 5.5).
 
 Package descriptions and cross-check data come from the [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation), [fadeltd/xiaomi-debloater](https://github.com/fadeltd/xiaomi-debloater) and [ovsky/hyperos-debloater](https://github.com/ovsky/hyperos-debloater) projects and their contributors. The lists are downloaded at run time and are not included in this repository.
 
