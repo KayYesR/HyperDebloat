@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.1'
+$Script:Version = '0.6.3'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -58,6 +58,19 @@ $Script:Lists = [ordered]@{
     fadeltd = 'https://raw.githubusercontent.com/fadeltd/xiaomi-debloater/main/bloatware.json'
     ovsky   = 'https://raw.githubusercontent.com/ovsky/hyperos-debloater/main/data/config/services.json'
 }
+
+# Everyday apps that are never ticked for you, even when rated GREEN or when the phone shows no icon for them.
+# They can still be removed by ticking them yourself.
+$Script:KeepUnticked = @(
+    'com.google.android.youtube',          # YouTube
+    'com.android.chrome',                  # Google Chrome
+    'com.google.ar.lens',                  # Google Lens
+    'com.google.android.apps.tachyon',     # Google Meet
+    'com.whatsapp',                        # WhatsApp
+    'com.instagram.android',               # Instagram
+    'com.google.android.apps.docs',        # Google Drive
+    'com.google.android.gm'                # Gmail
+)
 
 $Script:TierInfo = @{
     1 = @{ Label = 'SAFE';     Colour = 'GREEN';  Console = 'Green';      Hex = '#D9F2D9' }
@@ -648,7 +661,7 @@ function Get-Rating([string]$Pkg, [bool]$IsSystem, $Idx, $Facts) {
         Lists       = $listsSay
         Reason      = ($notes -join '; ')
         Facts       = $f
-        UserApp     = [bool]$pv.HasIcon
+        UserApp     = [bool]$pv.HasIcon -or ($Script:KeepUnticked -contains $Pkg)
         Category    = Get-Category $Pkg $desc ([bool]$pv.HasIcon) $(if ($f) { [string]$f.Partition } else { '' })
     }
 }
@@ -664,7 +677,7 @@ function Get-Classification($Idx, $Sets, $Facts) {
 # ----------------------------------------------------------------------------------------------
 # Selection UI
 # ----------------------------------------------------------------------------------------------
-function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '') {
+function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '', [switch]$AllowFlagged) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
@@ -679,7 +692,8 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     # PowerShell variable names ignore case, so the label must not be called $legend ($Legend is the text).
     $legendLabel = New-Object Windows.Forms.Label
     $legendLabel.AutoSize = $false; $legendLabel.Dock = 'Fill'
-    $legendText = if ($Legend) { $Legend } else { 'GREEN = safe  |  YELLOW = a minor feature may break  |  ORANGE = a notable/core feature may break  |  RED = can stop the phone booting  |  GREY = flagged, cannot be selected' }
+    $greyText = if ($AllowFlagged) { 'GREY = flagged: unknown to every list, tick only if you know what it is' } else { 'GREY = flagged, cannot be selected' }
+    $legendText = if ($Legend) { $Legend } else { "GREEN = safe  |  YELLOW = a minor feature may break  |  ORANGE = a notable/core feature may break  |  RED = can stop the phone booting  |  $greyText" }
     $legendLabel.Text = "$legendText`r`nClick a row to tick or untick it, then press '$ActionText'. Pick a category or type a name below to narrow the list."
     $legendLabel.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 0)
     $filterBar = New-Object Windows.Forms.FlowLayoutPanel
@@ -722,7 +736,7 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
         $row = $grid.Rows[$i]
         $row.Tag = $it
         $row.DefaultCellStyle.BackColor = [Drawing.ColorTranslator]::FromHtml($Script:TierInfo[[int]$it.Tier].Hex)
-        if ($it.Tier -eq 0) { $row.Cells['Sel'].ReadOnly = $true; $row.DefaultCellStyle.ForeColor = [Drawing.Color]::DimGray }
+        if ($it.Tier -eq 0) { $row.DefaultCellStyle.ForeColor = [Drawing.Color]::DimGray; if (-not $AllowFlagged) { $row.Cells['Sel'].ReadOnly = $true } }
     }
 
     $grid.Add_CurrentCellDirtyStateChanged({ if ($grid.IsCurrentCellDirty) { $grid.CommitEdit([Windows.Forms.DataGridViewDataErrorContexts]::Commit) } })
@@ -750,7 +764,7 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
         if ($ev.RowIndex -lt 0 -or $ev.ColumnIndex -lt 0) { return }
         if ($grid.Columns[$ev.ColumnIndex].Name -eq 'Sel') { return }
         $r = $grid.Rows[$ev.RowIndex]
-        if ($r.Tag.Tier -eq 0) { return }
+        if ($r.Tag.Tier -eq 0 -and -not $AllowFlagged) { return }
         $r.Cells['Sel'].Value = -not ($r.Cells['Sel'].Value -eq $true)
     })
     $btnSafe.Add_Click({ foreach ($r in $grid.Rows) { if ($r.Tag.Tier -eq 1) { $r.Cells['Sel'].Value = $true } }; & $updateCount })
@@ -779,7 +793,7 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     $Script:GridResult = @()
     $btnGo.Add_Click({
         $grid.EndEdit()
-        $Script:GridResult = @(foreach ($r in $grid.Rows) { if ($r.Cells['Sel'].Value -eq $true -and $r.Tag.Tier -ne 0) { $r.Tag } })
+        $Script:GridResult = @(foreach ($r in $grid.Rows) { if ($r.Cells['Sel'].Value -eq $true -and ($AllowFlagged -or $r.Tag.Tier -ne 0)) { $r.Tag } })
         if ($Script:GridResult.Count -eq 0) {
             [void][Windows.Forms.MessageBox]::Show("Nothing is ticked.`n`nClick a row (or its box in the Pick column) to tick it, then press '$ActionText'. Use '< Back' to return without changing anything.", 'HyperDebloat', 'OK', 'Information')
             return
@@ -797,18 +811,18 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     return , @($Script:GridResult)
 }
 
-function Select-InConsole($Items, [string]$ActionText) {
+function Select-InConsole($Items, [string]$ActionText, [switch]$AllowFlagged) {
     # Fallback when no window can be shown.
-    $pickable = @($Items | Where-Object { $_.Tier -ne 0 })
+    $pickable = @($Items | Where-Object { $AllowFlagged -or $_.Tier -ne 0 })
     for ($i = 0; $i -lt $pickable.Count; $i++) {
         $it = $pickable[$i]
         Write-Host ('{0,4}  {1,-9} {2,-22} {3,-45} {4}' -f ($i + 1), $it.Risk, $it.Category, $it.Package, $it.Description) -ForegroundColor $Script:TierInfo[[int]$it.Tier].Console
     }
     Write-Host ''
-    $ans = Read-Host "Numbers to $ActionText (e.g. 1,4,7-12), G = all GREEN, A = all, Enter = nothing"
+    $ans = Read-Host "Numbers to $ActionText (e.g. 1,4,7-12), G = all GREEN, A = all except GREY, Enter = nothing"
     if ([string]::IsNullOrWhiteSpace($ans)) { return , @() }
     if ($ans.Trim() -match '^[gG]$') { return , @($pickable | Where-Object { $_.Tier -eq 1 }) }
-    if ($ans.Trim() -match '^[aA]$') { return , @($pickable) }
+    if ($ans.Trim() -match '^[aA]$') { return , @($pickable | Where-Object { $_.Tier -ne 0 }) }
     $set = @{}
     foreach ($part in ($ans -split ',')) {
         $part = $part.Trim()
@@ -822,7 +836,7 @@ function Get-IconAppNote($Items) {
     # Names any ticked app that has an icon on the home screen, so nothing the user sees daily goes by accident.
     $apps = @($Items | Where-Object { $_.UserApp } | ForEach-Object { $_.Package })
     if ($apps.Count -eq 0) { return '' }
-    return "`n`nThese $($apps.Count) are apps with an icon on your home screen (you may use them):`n  " + ($apps -join "`n  ") + "`n`nPress No and untick them if you want to keep them."
+    return "`n`nThese $($apps.Count) are everyday apps (home-screen icon or on the keep list) that you may use:`n  " + ($apps -join "`n  ") + "`n`nPress No and untick them if you want to keep them."
 }
 
 function ConvertTo-FlatList($Value) {
@@ -830,9 +844,9 @@ function ConvertTo-FlatList($Value) {
     return , @($Value | ForEach-Object { $_ } | Where-Object { $null -ne $_ })
 }
 
-function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '') {
-    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -PreselectBackground:$PreselectBackground -Legend $Legend -NoMatchHint $NoMatchHint }
-    return Select-InConsole -Items $Items -ActionText $ActionText
+function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$PreselectSafe, [switch]$PreselectAll, [switch]$PreselectBackground, [string]$Legend = '', [string]$NoMatchHint = '', [switch]$AllowFlagged) {
+    if ($Script:Gui) { return Show-SelectionGrid -Items $Items -Title $Title -ActionText $ActionText -PreselectSafe:$PreselectSafe -PreselectAll:$PreselectAll -PreselectBackground:$PreselectBackground -Legend $Legend -NoMatchHint $NoMatchHint -AllowFlagged:$AllowFlagged }
+    return Select-InConsole -Items $Items -ActionText $ActionText -AllowFlagged:$AllowFlagged
 }
 
 # ----------------------------------------------------------------------------------------------
@@ -910,7 +924,7 @@ function Invoke-Recommended($Rows, [string]$DeviceDir) {
     if ($flagged) { Write-Info "$flagged packages were flagged (phone and lists disagree, or no data) and will not be touched. See the report." }
     $apps = @($green | Where-Object { $_.UserApp })
     if ($Script:Gui) {
-        $legend = "All of these are GREEN: removing them breaks nothing else. Background junk is ticked. Apps with an icon (you may use them) are NOT ticked - tick any you don't want."
+        $legend = "All of these are GREEN: removing them breaks nothing else. Background junk is ticked. Everyday apps (YouTube, Chrome, Gmail, Drive, Meet, Lens, WhatsApp, Instagram and anything with an icon) are NOT ticked - tick any you don't want."
         $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend -NoMatchHint 'Recommended shows GREEN only. Go Back > Custom to search everything.')
         if ($green.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
     }
@@ -926,7 +940,7 @@ function Invoke-Recommended($Rows, [string]$DeviceDir) {
 
 function Invoke-Custom($Rows, [string]$DeviceDir) {
     Write-Step 'Custom: opening the list'
-    $picked = ConvertTo-FlatList (Select-Packages -Items $Rows -Title 'HyperDebloat - Custom' -ActionText 'Remove selected' -PreselectSafe)
+    $picked = ConvertTo-FlatList (Select-Packages -Items $Rows -Title 'HyperDebloat - Custom' -ActionText 'Remove selected' -PreselectBackground -AllowFlagged)
     if ($picked.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
 
     $red = @($picked | Where-Object { $_.Tier -eq 4 })
@@ -942,6 +956,21 @@ function Invoke-Custom($Rows, [string]$DeviceDir) {
         }
         else { $typed = if ($AssumeYes) { 'REMOVE' } else { Read-Host '  Type REMOVE to include them, or press Enter to skip them' } }
         if ($typed -cne 'REMOVE') { $picked = @($picked | Where-Object { $_.Tier -ne 4 }); Write-Info 'RED packages skipped.' }
+    }
+
+    $grey = @($picked | Where-Object { $_.Tier -eq 0 })
+    if ($grey.Count -gt 0) {
+        Write-Host ''
+        Write-Host "  You selected $($grey.Count) FLAGGED (unknown) packages:" -ForegroundColor DarkGray
+        foreach ($g in $grey) { Write-Host "    $($g.Package) - $($g.Reason)" -ForegroundColor DarkGray }
+        $warn = "No list knows what these do, so the tool cannot say what breaks without them. If something stops working, use Restore."
+        if ($Script:Gui) {
+            $names = ($grey | ForEach-Object { $_.Package }) -join "`n"
+            $ok = Read-YesNo "You selected $($grey.Count) FLAGGED (unknown) package(s):`n`n$names`n`n$warn`n`nRemove them anyway?" $false -Warning
+            $typed = if ($ok) { 'REMOVE' } else { '' }
+        }
+        else { Write-Host "  $warn" -ForegroundColor DarkGray; $typed = if ($AssumeYes) { '' } else { Read-Host '  Type REMOVE to include them, or press Enter to skip them' } }
+        if ($typed -cne 'REMOVE') { $picked = @($picked | Where-Object { $_.Tier -ne 0 }); Write-Info 'FLAGGED packages skipped.' }
     }
     if ($picked.Count -eq 0) { Write-Info 'Nothing left to remove.'; return }
 

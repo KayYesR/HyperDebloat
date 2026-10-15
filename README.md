@@ -12,7 +12,7 @@ It reads every package and running process on **your** phone and rates each pack
 | 🟡 Yellow | MODERATE | A minor feature may stop working. |
 | 🟠 Orange | HIGH | A notable or core feature may stop working. |
 | 🔴 Red | UNSAFE | Can stop the phone booting or working properly. |
-| ⚪ Grey | FLAGGED | Unknown to every list, contradicts the lists, or the phone gave no data. Never touched. |
+| ⚪ Grey | FLAGGED | Unknown to every list, contradicts the lists, or the phone gave no data. Never ticked for you; in Custom you can tick it after a warning. |
 
 ## How to use
 
@@ -22,7 +22,7 @@ It reads every package and running process on **your** phone and rates each pack
 4. Put `HyperDebloat.ps1` and `Run-HyperDebloat.bat` in the same folder and double-click `Run-HyperDebloat.bat`.
 5. The home window opens. Choose an action:
    - **Recommended** shows every green package, all ticked. Untick anything you want to keep and press **Remove selected**.
-   - **Custom** opens the full colour-coded list. Pick a **Category** (Ads & tracking, Google apps, Xiaomi & phone apps...) or type a name to narrow it, tick what you want and press **Remove selected**. Red packages ask for an extra confirmation.
+   - **Custom** opens the full colour-coded list, with the same packages ticked as in Recommended. Pick a **Category** (Ads & tracking, Google apps, Xiaomi & phone apps...) or type a name to narrow it, tick what you want and press **Remove selected**. Red and grey packages ask for an extra confirmation.
    - **Restore** asks the phone what has been removed or disabled, by this tool or any other (Xiaomi ADB/Fastboot Tools, UAD, plain adb), and puts back what you tick. Removed system apps are reinstalled, disabled apps are re-enabled, and ordinary apps whose file was deleted get their Play Store page opened on the phone.
    - **Rescan phone**, **Open reports folder** and **Quit**.
 
@@ -58,9 +58,9 @@ The lists are [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal
 - All three lists say it is junk and nothing red applies: green, or yellow if other apps clearly rely on it or it sits with the hardware drivers.
 - The two lists that know it both say safe and nothing is using it right now: one step lower.
 - Only one list knows it: never green, because it cannot be cross-checked.
-- No list knows it: flagged grey and never touched, because nothing says what it does.
+- No list knows it: flagged grey, because nothing says what it does. Recommended never offers it; Custom lets you tick it after a warning.
 
-Recommended ticks green background components automatically. Green apps with an icon (Gmail, YouTube, Calculator...) are listed but not ticked, because you may use them.
+Recommended ticks green background components automatically. Green apps with an icon (Gmail, YouTube, Calculator...) are listed but not ticked, because you may use them. YouTube, Chrome, Google Lens, Google Meet, WhatsApp, Instagram, Google Drive and Gmail are never ticked for you, even on phones where they have no icon; tick them yourself to remove them.
 Before anything is removed, the confirmation names every ticked app that has an icon on the home screen.
 
 ### Categories
