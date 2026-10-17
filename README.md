@@ -1,6 +1,6 @@
 # HyperDebloat
 
-> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10) and Redmi Turbo 5 ( HyperOS 3, android 16). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
+> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
 
 A device-aware debloater for Xiaomi, Redmi and POCO phones running HyperOS or MIUI. Windows only, no root, no install.
 
@@ -90,6 +90,7 @@ Each package also gets a category from its name, its list description, whether i
 - Packages are removed for user 0 only (`pm uninstall -k --user 0`). Nothing is deleted from the system partition, OTA updates keep working, and a factory reset restores everything.
 - Restore does not depend on this tool's logs: it reads the phone's own record of removed and disabled packages, so removals from earlier sessions or other tools can be undone. It checks each app is really back, and if one is not, it says so and offers to open its Play Store page on the phone; your app data is kept.
 - Some packages are protected by MIUI/HyperOS and refuse removal (`Failure [-1000]`). Nothing changes in that case.
+- The tool remembers what it removed. If a later scan finds one of those apps installed again, it tells you and saves the phone's log from that moment as `came_back_<date>.txt` in the reports folder. Please attach that file to a GitHub issue so the cause can be found.
 - Every run saves a dated report in `Documents\HyperDebloat\<model>_<build>\`: phone model, HyperOS build, every rating, the phone's evidence, the lists' ratings and the final reasoning. Removals are logged in the same folder.
 
 ## Credits

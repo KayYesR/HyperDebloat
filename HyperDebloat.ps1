@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.3'
+$Script:Version = '0.6.4'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -877,10 +877,57 @@ function Save-Report($Rows, $Dev, [string]$DeviceDir) {
     Write-Info "Full report: $report"
 }
 
+# ----------------------------------------------------------------------------------------------
+# Came-back check: remembers what this tool removed, and on every scan reports any of it that is
+# installed again, with the phone's log from that moment, so the cause can be traced.
+# ----------------------------------------------------------------------------------------------
+function Get-RemovedState {
+    $h = @{}
+    $p = Join-Path $Script:DeviceDir 'removed_state.json'
+    if (Test-Path $p) {
+        try { $o = Get-Content $p -Raw | ConvertFrom-Json; foreach ($prop in $o.PSObject.Properties) { $h[$prop.Name] = [string]$prop.Value } } catch { }
+    }
+    return $h
+}
+
+function Save-RemovedState($State) {
+    $p = Join-Path $Script:DeviceDir 'removed_state.json'
+    try { ([pscustomobject]$State | ConvertTo-Json) | Set-Content -Path $p -Encoding UTF8 } catch { }
+}
+
+function Test-CameBack($Installed) {
+    $state = Get-RemovedState
+    $back = @($state.Keys | Where-Object { $Installed.ContainsKey($_) } | Sort-Object)
+    if ($back.Count -eq 0) { return }
+    $file = Join-Path $Script:DeviceDir ("came_back_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("HyperDebloat $Script:Version - removed apps found installed again at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    foreach ($p in $back) { $lines.Add("  $p  (removed by this tool at $($state[$p]))") }
+    foreach ($p in $back) {
+        $lines.Add(''); $lines.Add("==== dumpsys package $p")
+        foreach ($l in (Invoke-Shell "dumpsys package $p")) {
+            if ($l -match 'codePath|versionName|firstInstallTime|lastUpdateTime|installerPackageName|initiatingPackageName|User 0:') { $lines.Add($l) }
+        }
+    }
+    $lines.Add(''); $lines.Add('==== phone log lines about these apps or app installs')
+    $names = ($back | ForEach-Object { [regex]::Escape($_) }) -join '|'
+    foreach ($l in (Invoke-Adb @('logcat', '-d'))) {
+        if ($l -match $names -or $l -match '(?i)install-existing|installExisting|installPackage|PackageInstaller') { $lines.Add($l) }
+    }
+    try { $lines | Set-Content -Path $file -Encoding UTF8 } catch { }
+    foreach ($p in $back) { $state.Remove($p) }
+    Save-RemovedState $state
+    $list = $back -join "`n  "
+    Write-Warn "$($back.Count) app(s) removed earlier are installed again: $($back -join ', ')"
+    Write-Info "The phone's log from now is saved in $file"
+    Show-Notice "$($back.Count) app(s) you removed earlier came back:`n  $list`n`nThe phone's log from this moment is saved in:`n$file`n`nSend that file to the developer (attach it to a GitHub issue) so the cause can be found. You can remove the apps again with Custom." -Warning
+}
+
 function Remove-Packages($Items, [string]$DeviceDir) {
     $Items = ConvertTo-FlatList $Items
     $log = Join-Path $DeviceDir ("removed_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
     $results = New-Object System.Collections.Generic.List[object]
+    if (-not $DryRun) { $null = Invoke-Adb @('logcat', '-G', '16M') }
     $i = 0
     foreach ($it in $Items) {
         $i++
@@ -898,6 +945,9 @@ function Remove-Packages($Items, [string]$DeviceDir) {
     Write-Host ''
     if ($DryRun) { Write-Info "Dry run: $($Items.Count) packages would be removed. Nothing was changed."; Show-Notice "Dry run: $($Items.Count) package(s) would be removed. Nothing was changed."; return }
     $results | Export-Csv -Path $log -NoTypeInformation -Encoding UTF8
+    $state = Get-RemovedState
+    foreach ($r in $results) { if ($r.Result -match '^Success') { $state[$r.Package] = ($r.Time -replace 'T', ' ') } }
+    Save-RemovedState $state
     $done = @($results | Where-Object { $_.Result -match '^Success' }).Count
     if ($done -gt 0) { $Script:NeedScan = $true }
     Write-Info "Removed $done of $($Items.Count). Log saved: $log"
@@ -1060,6 +1110,7 @@ function Invoke-Restore([string]$Model) {
     if ($picked.Count -eq 0) { Write-Info 'Nothing selected.'; return }
     if (-not (Read-YesNo "Restore $($picked.Count) packages?" $true)) { return }
     $lost = New-Object System.Collections.Generic.List[string]
+    $restored = New-Object System.Collections.Generic.List[string]
     $back = 0
     foreach ($it in $picked) {
         if ($DryRun) { Write-Host ('  {0,-50} DRY-RUN ({1})' -f $it.Package, $it.Risk) -ForegroundColor Green; continue }
@@ -1069,13 +1120,13 @@ function Invoke-Restore([string]$Model) {
                 # install-existing can report success without restoring anything, so check that
                 # the phone really has the app for this user now.
                 $now = Get-PackageSet "pm list packages --user 0 $($it.Package)"
-                if ($now.ContainsKey($it.Package)) { $back++; Write-Host ('  {0,-50} restored' -f $it.Package) -ForegroundColor Green }
+                if ($now.ContainsKey($it.Package)) { $back++; $restored.Add($it.Package); Write-Host ('  {0,-50} restored' -f $it.Package) -ForegroundColor Green }
                 else { $lost.Add($it.Package); Write-Host ('  {0,-50} NOT restored - reinstall it from the Play Store' -f $it.Package) -ForegroundColor Red }
             }
             'enable' {
                 $res = ((Invoke-Shell "pm enable --user 0 $($it.Package)") -join ' ').Trim()
                 $stillOff = (Get-PackageSet "pm list packages -d --user 0 $($it.Package)").ContainsKey($it.Package)
-                if (-not $stillOff) { $back++; Write-Host ('  {0,-50} re-enabled' -f $it.Package) -ForegroundColor Green }
+                if (-not $stillOff) { $back++; $restored.Add($it.Package); Write-Host ('  {0,-50} re-enabled' -f $it.Package) -ForegroundColor Green }
                 else { Write-Host ('  {0,-50} could not re-enable: {1}' -f $it.Package, $res) -ForegroundColor Red }
             }
             'store' {
@@ -1086,6 +1137,7 @@ function Invoke-Restore([string]$Model) {
     }
     if ($DryRun) { Show-Notice "Dry run: $($picked.Count) package(s) would be restored. Nothing was changed."; return }
     $Script:NeedScan = $true
+    if ($restored.Count) { $state = Get-RemovedState; foreach ($p in $restored) { $state.Remove($p) }; Save-RemovedState $state }
     if ($lost.Count -gt 0) {
         Write-Host ''
         Write-Warn "$($lost.Count) app(s) must be reinstalled from the Play Store (your data was kept)."
@@ -1220,6 +1272,7 @@ function Invoke-Scan($Dev) {
     Write-Step 'Scanning the phone (read-only)'
     $sets = Get-PackageSets
     Write-Info "$($sets.All.Count) packages installed ($($sets.System.Count) system)"
+    try { Test-CameBack $sets.All } catch { Write-Warn "Came-back check skipped: $($_.Exception.Message)" }
     if (-not $Script:Gui -and -not $AssumeYes) {
         Write-Info 'Tip: open the apps you rely on (file manager, camera, gallery, payments) on the phone'
         Write-Info 'before this scan, so the live-connection check can see what they use.'
