@@ -1,6 +1,6 @@
 # HyperDebloat
 
-> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
+> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10) and a Redmi Turbo 5 (HyperOS 3, Android 16). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
 
 A device-aware debloater for Xiaomi, Redmi and POCO phones running HyperOS or MIUI. Windows only, no root, no install.
 
@@ -80,7 +80,7 @@ Each package also gets a category from its name, its list description, whether i
 
 ## Limits
 
-- Tested on a Redmi 9 Prime (MIUI 12, Android 10). HyperOS phones have not been tested yet.
+- Tested on a Redmi 9 Prime (MIUI 12, Android 10) and a Redmi Turbo 5 (HyperOS 3, Android 16). Other models have not been tested yet.
 - The live-connection check is a snapshot. It only sees apps that are open or running during the scan.
 - Green ratings are reliable; yellow and orange are informed warnings, not guarantees. After removing anything beyond green, reboot and test what you rely on.
 
