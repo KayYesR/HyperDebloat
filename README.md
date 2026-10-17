@@ -1,6 +1,6 @@
 # HyperDebloat
 
-> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
+> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10) and Redmi Turbo 5 ( HyperOS 3, android 16). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
 
 A device-aware debloater for Xiaomi, Redmi and POCO phones running HyperOS or MIUI. Windows only, no root, no install.
 
