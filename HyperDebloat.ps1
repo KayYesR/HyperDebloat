@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.5'
+$Script:Version = '0.6.6'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -970,7 +970,11 @@ function Remove-Packages($Items, [string]$DeviceDir) {
     foreach ($it in $Items) {
         $i++
         if ($DryRun) { $res = 'DRY-RUN' }
-        else { $res = ((Invoke-Shell "pm uninstall -k --user 0 $($it.Package)") -join ' ').Trim() }
+        else {
+            $res = ((Invoke-Shell "pm uninstall -k --user 0 $($it.Package)") -join ' ').Trim()
+            # Some ROMs answer Success without removing anything, so check the phone really dropped it.
+            if ($res -match '^Success' -and (Test-InstalledForUser $it.Package)) { $res = 'Phone said Success, but the app is still installed' }
+        }
         $ok = $res -match '^(Success|DRY-RUN)'
         $color = if ($ok) { 'Green' } else { 'Red' }
         $shown = $res
