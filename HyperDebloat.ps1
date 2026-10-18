@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.4'
+$Script:Version = '0.6.5'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -923,6 +923,44 @@ function Test-CameBack($Installed) {
     Show-Notice "$($back.Count) app(s) you removed earlier came back:`n  $list`n`nThe phone's log from this moment is saved in:`n$file`n`nSend that file to the developer (attach it to a GitHub issue) so the cause can be found. You can remove the apps again with Custom." -Warning
 }
 
+function Test-InstalledForUser([string]$Pkg) {
+    return (Get-PackageSet "pm list packages --user 0 $Pkg").ContainsKey($Pkg)
+}
+
+function Invoke-PhoneUninstall($Results) {
+    # Fallback for apps the ROM refuses to remove over adb (for example Failure [-1000]): open the
+    # phone's own uninstall screen, the same one Settings and file managers use, and let the user
+    # confirm there. Results are updated in place.
+    $failed = @($Results | Where-Object { $_.Result -notmatch '^Success' })
+    if ($failed.Count -eq 0 -or $AssumeYes) { return }
+    $names = ($failed | ForEach-Object { $_.Package }) -join "`n  "
+    $ask = "$($failed.Count) app(s) could not be removed this way:`n  $names`n`nThe phone may still let you uninstall them from its own uninstall screen (the one Settings uses). For each app, the phone will ask; tap OK (or Uninstall) there.`n`nNote: this removes the app completely, or only its update if it is a system app. Restore may not be able to bring it back; you would reinstall it from a store.`n`nTry it?"
+    if (-not (Read-YesNo $ask $false)) { return }
+    foreach ($r in $failed) {
+        if (-not (Test-InstalledForUser $r.Package)) { $r.Result = 'Success (already gone)'; continue }
+        $null = Invoke-Shell "am start -a android.intent.action.DELETE -d package:$($r.Package)"
+        Write-Host "  $($r.Package): uninstall screen opened on the phone - tap OK there" -ForegroundColor Cyan
+        if ($Script:Gui) { Show-Notice "The phone is asking whether to uninstall:`n`n$($r.Package)`n`nTap OK (or Uninstall) on the phone, wait a moment, then press OK here." }
+        else { $null = Read-Host '  Tap OK on the phone, then press Enter here' }
+        Start-Sleep -Seconds 2
+        if (-not (Test-InstalledForUser $r.Package)) {
+            $r.Result = 'Success (phone uninstall)'
+            Write-Host ('  {0,-50} removed by the phone' -f $r.Package) -ForegroundColor Green
+            continue
+        }
+        # A system app keeps its factory copy after its update is removed; try the normal removal once more.
+        $again = ((Invoke-Shell "pm uninstall -k --user 0 $($r.Package)") -join ' ').Trim()
+        if ($again -match '^Success' -and -not (Test-InstalledForUser $r.Package)) {
+            $r.Result = 'Success (after phone uninstall of its update)'
+            Write-Host ('  {0,-50} removed' -f $r.Package) -ForegroundColor Green
+        }
+        else {
+            $r.Result = "$($r.Result); phone uninstall: still installed ($again)"
+            Write-Host ('  {0,-50} still installed - the phone did not allow it, or it was cancelled' -f $r.Package) -ForegroundColor Red
+        }
+    }
+}
+
 function Remove-Packages($Items, [string]$DeviceDir) {
     $Items = ConvertTo-FlatList $Items
     $log = Join-Path $DeviceDir ("removed_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
@@ -944,6 +982,7 @@ function Remove-Packages($Items, [string]$DeviceDir) {
     }
     Write-Host ''
     if ($DryRun) { Write-Info "Dry run: $($Items.Count) packages would be removed. Nothing was changed."; Show-Notice "Dry run: $($Items.Count) package(s) would be removed. Nothing was changed."; return }
+    Invoke-PhoneUninstall $results
     $results | Export-Csv -Path $log -NoTypeInformation -Encoding UTF8
     $state = Get-RemovedState
     foreach ($r in $results) { if ($r.Result -match '^Success') { $state[$r.Package] = ($r.Time -replace 'T', ' ') } }
