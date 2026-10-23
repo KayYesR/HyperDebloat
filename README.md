@@ -1,6 +1,6 @@
 # HyperDebloat
 
-> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10) and a Redmi Turbo 5 (HyperOS 3, Android 16). HyperOS testing on a POCO X8 Pro Max is next; reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
+> Tested so far on a Redmi 9 Prime (MIUI 12, Android 10), a Redmi Turbo 5 / POCO X8 Pro (HyperOS 3, Android 16) and a POCO X8 Pro Max (HyperOS 3). Reports from other phones are welcome (run with `-DryRun -SaveRaw` and attach `raw_adb_output.txt` and the report CSV to an issue).
 
 A device-aware debloater for Xiaomi, Redmi and POCO phones running HyperOS or MIUI. Windows only, no root, no install.
 
@@ -13,6 +13,7 @@ It reads every package and running process on **your** phone and rates each pack
 | 🟠 Orange | HIGH | A notable or core feature may stop working. |
 | 🔴 Red | UNSAFE | Can stop the phone booting or working properly. |
 | ⚪ Grey | FLAGGED | Unknown to every list, contradicts the lists, or the phone gave no data. Never ticked for you; in Custom you can tick it after a warning. |
+| 🔵 Blue | APP | Ordinary app (not a system app). Never ticked for you; setup-installed apps are tagged. |
 
 ## How to use
 
@@ -60,6 +61,10 @@ The lists are [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal
 - Only one list knows it: never green, because it cannot be cross-checked.
 - No list knows it: flagged grey, because nothing says what it does. Recommended never offers it; Custom lets you tick it after a warning.
 
+### Ordinary apps and setup junk
+
+Apps that are not system apps (games like Block Blast and Tile Smash, and anything you installed) are listed in blue. An app installed within 2 hours of the first app on the phone is tagged **Installed during setup**: on Xiaomi phones that is when the preloaded junk arrives. Apps restored from your backup arrive at the same time, so blue apps are never ticked for you; Recommended lists the setup ones so you can tick what you don't want. Ordinary apps are removed completely, so Restore can only open their Play Store page.
+
 Recommended ticks green background components automatically. Green apps with an icon (Gmail, YouTube, Calculator...) are listed but not ticked, because you may use them. YouTube, Chrome, Google Lens, Google Meet, WhatsApp, Instagram, Google Drive and Gmail are never ticked for you, even on phones where they have no icon; tick them yourself to remove them.
 Before anything is removed, the confirmation names every ticked app that has an icon on the home screen.
 
@@ -80,13 +85,13 @@ Each package also gets a category from its name, its list description, whether i
 
 ## Limits
 
-- Tested on a Redmi 9 Prime (MIUI 12, Android 10) and a Redmi Turbo 5 (HyperOS 3, Android 16). Other models have not been tested yet.
+- Tested on a Redmi 9 Prime (MIUI 12, Android 10), a Redmi Turbo 5 / POCO X8 Pro (HyperOS 3, Android 16) and a POCO X8 Pro Max (HyperOS 3). Other models have not been tested yet.
 - The live-connection check is a snapshot. It only sees apps that are open or running during the scan.
 - Green ratings are reliable; yellow and orange are informed warnings, not guarantees. After removing anything beyond green, reboot and test what you rely on.
 
 ## Safety
 
-- Only system apps are handled. Ordinary apps, including preloads installed to user storage (on many ROMs Google Drive, Photos or Facebook), are left out: removing them this way deletes the app file, so they could not be restored. Uninstall those normally on the phone.
+- System apps are removed for your user only and can always be restored. Ordinary apps (blue) are removed completely, so Restore can only open their Play Store page; they are never ticked for you.
 - Packages are removed for user 0 only (`pm uninstall -k --user 0`). Nothing is deleted from the system partition, OTA updates keep working, and a factory reset restores everything.
 - Restore does not depend on this tool's logs: it reads the phone's own record of removed and disabled packages, so removals from earlier sessions or other tools can be undone. It checks each app is really back, and if one is not, it says so and offers to open its Play Store page on the phone; your app data is kept.
 - After each removal the tool checks the app is really gone; some HyperOS versions answer `Success` and keep the app.

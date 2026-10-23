@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Script:Version = '0.6.6'
+$Script:Version = '0.7.0'
 
 # ----------------------------------------------------------------------------------------------
 # Paths and constants
@@ -78,6 +78,7 @@ $Script:TierInfo = @{
     3 = @{ Label = 'HIGH';     Colour = 'ORANGE'; Console = 'DarkYellow'; Hex = '#FFDDB0' }
     4 = @{ Label = 'UNSAFE';   Colour = 'RED';    Console = 'Red';        Hex = '#F8C8C8' }
     0 = @{ Label = 'FLAGGED';  Colour = 'GREY';   Console = 'DarkGray';   Hex = '#DDDDDD' }
+    5 = @{ Label = 'APP';      Colour = 'BLUE';   Console = 'Cyan';       Hex = '#D6E8FA' }
 }
 
 # ----------------------------------------------------------------------------------------------
@@ -355,6 +356,7 @@ function New-Facts {
         OverlayTarget = ''; OverlayState = ''
         Roles = (New-Object System.Collections.Generic.List[string])
         Running = $false
+        InstallTime = ''; Installer = ''
     }
 }
 
@@ -414,6 +416,8 @@ function Get-DeviceFacts([hashtable]$Installed) {
             if ($null -eq $f.AppId -or $id -lt $f.AppId) { $f.AppId = $id }
         }
         elseif ($line -match '^\s*sharedUser=SharedUserSetting\{\w+\s+([^/\s}]+)') { $f.SharedUser = $Matches[1] }
+        elseif ($line -match '^\s*firstInstallTime=(.+)$') { if (-not $f.InstallTime) { $f.InstallTime = $Matches[1].Trim() } }
+        elseif ($line -match '^\s*installerPackageName=(\S+)') { if (-not $f.Installer) { $f.Installer = $Matches[1] } }
         elseif ($line -match '^\s*codePath=(\S+)') {
             $part = Get-Partition $Matches[1]
             # The active entry comes first; an updated system app keeps its original partition.
@@ -666,11 +670,53 @@ function Get-Rating([string]$Pkg, [bool]$IsSystem, $Idx, $Facts) {
     }
 }
 
-function Get-Classification($Idx, $Sets, $Facts) {
-    $rows = foreach ($p in $Sets.All.Keys) {
-        Get-Rating -Pkg $p -IsSystem $Sets.System.ContainsKey($p) -Idx $Idx -Facts $Facts
+function ConvertTo-InstallDate([string]$Text) {
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParseExact($Text.Trim(), 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$d) -and $d.Year -ge 2012) { return $d }
+    return $null
+}
+
+function Get-OrdinaryRow([string]$Pkg, $Idx, $Facts, $SetupTime) {
+    # Ordinary (non-system) apps, including junk the phone installs during first setup (games and the
+    # like). They are never rated green or pre-ticked: the phone cannot tell setup junk from apps the
+    # user restored from a backup at the same moment, so the user decides.
+    $src = [ordered]@{}
+    if ($Idx.uad.ContainsKey($Pkg))     { $src['UAD-ng']  = $Idx.uad[$Pkg] }
+    if ($Idx.fadeltd.ContainsKey($Pkg)) { $src['fadeltd'] = $Idx.fadeltd[$Pkg] }
+    if ($Idx.ovsky.ContainsKey($Pkg))   { $src['ovsky']   = $Idx.ovsky[$Pkg] }
+    $desc = ''
+    if ($Idx.fadeltd.ContainsKey($Pkg)) { $desc = $Idx.fadeltd[$Pkg].Desc }
+    if (-not $desc -and $Idx.ovskyDesc.ContainsKey($Pkg)) { $desc = $Idx.ovskyDesc[$Pkg] }
+    if (-not $desc -and $Idx.uad.ContainsKey($Pkg)) { $desc = $Idx.uad[$Pkg].Desc }
+    $listsSay = if ($src.Count) { ($src.Keys | ForEach-Object { "$_`: $($src[$_].Rating)" }) -join ' | ' } else { 'not in any list' }
+    $f = $Facts[$Pkg]
+    $when = if ($f -and $f.InstallTime) { $f.InstallTime } else { 'unknown time' }
+    $by = if ($f -and $f.Installer -and $f.Installer -ne 'null') { $f.Installer } else { 'no installer recorded' }
+    $d = if ($f) { ConvertTo-InstallDate $f.InstallTime } else { $null }
+    $atSetup = ($null -ne $d -and $null -ne $SetupTime -and $d -le $SetupTime.AddHours(2))
+    $cat = if ($atSetup) { 'Installed during setup' } else { 'Your apps' }
+    $reason = if ($atSetup) { 'installed within 2 hours of the first app on this phone: probably preloaded at setup (apps restored from your backup arrive then too, so check it)' }
+              else { 'installed later, most likely by you' }
+    return [pscustomobject]@{
+        Tier = 5; Risk = $Script:TierInfo[5].Label; Package = $Pkg; Description = $desc
+        Phone = "ordinary app (not a system app), installed $when by $by"; Lists = $listsSay; Reason = $reason
+        Facts = $f; UserApp = $true; Category = $cat; Ordinary = $true; AtSetup = $atSetup
     }
-    $order = @{ 1 = 1; 2 = 2; 3 = 3; 4 = 4; 0 = 5 }
+}
+
+function Get-Classification($Idx, $Sets, $Facts) {
+    # The first ordinary app's install time marks when the phone was set up (system apps carry a build date).
+    $setup = $null
+    foreach ($p in $Sets.All.Keys) {
+        if ($Sets.System.ContainsKey($p) -or -not $Facts[$p]) { continue }
+        $d = ConvertTo-InstallDate $Facts[$p].InstallTime
+        if ($null -ne $d -and ($null -eq $setup -or $d -lt $setup)) { $setup = $d }
+    }
+    $rows = foreach ($p in $Sets.All.Keys) {
+        if ($Sets.System.ContainsKey($p)) { Get-Rating -Pkg $p -IsSystem $true -Idx $Idx -Facts $Facts }
+        else { Get-OrdinaryRow -Pkg $p -Idx $Idx -Facts $Facts -SetupTime $setup }
+    }
+    $order = @{ 1 = 1; 2 = 2; 3 = 3; 4 = 4; 0 = 5; 5 = 6 }
     return @($rows | Where-Object { $_ } | Sort-Object @{ Expression = { $order[[int]$_.Tier] } }, Category, Package)
 }
 
@@ -693,7 +739,7 @@ function Show-SelectionGrid($Items, [string]$Title, [string]$ActionText, [switch
     $legendLabel = New-Object Windows.Forms.Label
     $legendLabel.AutoSize = $false; $legendLabel.Dock = 'Fill'
     $greyText = if ($AllowFlagged) { 'GREY = flagged: unknown to every list, tick only if you know what it is' } else { 'GREY = flagged, cannot be selected' }
-    $legendText = if ($Legend) { $Legend } else { "GREEN = safe  |  YELLOW = a minor feature may break  |  ORANGE = a notable/core feature may break  |  RED = can stop the phone booting  |  $greyText" }
+    $legendText = if ($Legend) { $Legend } else { "GREEN = safe  |  YELLOW = a minor feature may break  |  ORANGE = a notable/core feature may break  |  RED = can stop the phone booting  |  $greyText  |  BLUE = ordinary app (never pre-ticked)" }
     $legendLabel.Text = "$legendText`r`nClick a row to tick or untick it, then press '$ActionText'. Pick a category or type a name below to narrow the list."
     $legendLabel.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 0)
     $filterBar = New-Object Windows.Forms.FlowLayoutPanel
@@ -834,9 +880,11 @@ function Select-InConsole($Items, [string]$ActionText, [switch]$AllowFlagged) {
 
 function Get-IconAppNote($Items) {
     # Names any ticked app that has an icon on the home screen, so nothing the user sees daily goes by accident.
-    $apps = @($Items | Where-Object { $_.UserApp } | ForEach-Object { $_.Package })
-    if ($apps.Count -eq 0) { return '' }
-    return "`n`nThese $($apps.Count) are everyday apps (home-screen icon or on the keep list) that you may use:`n  " + ($apps -join "`n  ") + "`n`nPress No and untick them if you want to keep them."
+    $apps = @($Items | Where-Object { $_.UserApp -and -not $_.Ordinary } | ForEach-Object { $_.Package })
+    $ord = @($Items | Where-Object { $_.Ordinary } | ForEach-Object { $_.Package })
+    $ordText = if ($ord.Count) { "`n`n$($ord.Count) ordinary app(s) will be removed completely; Restore can only open their Play Store page:`n  " + ($ord -join "`n  ") } else { '' }
+    if ($apps.Count -eq 0) { return $ordText }
+    return "`n`nThese $($apps.Count) are everyday apps (home-screen icon or on the keep list) that you may use:`n  " + ($apps -join "`n  ") + "`n`nPress No and untick them if you want to keep them." + $ordText
 }
 
 function ConvertTo-FlatList($Value) {
@@ -854,7 +902,7 @@ function Select-Packages($Items, [string]$Title, [string]$ActionText, [switch]$P
 # ----------------------------------------------------------------------------------------------
 function Write-Summary($Rows) {
     Write-Step 'Classification'
-    foreach ($t in @(1, 2, 3, 4, 0)) {
+    foreach ($t in @(1, 2, 3, 4, 0, 5)) {
         $n = @($Rows | Where-Object { $_.Tier -eq $t }).Count
         Write-Host ('  {0,-7} {1,-9} {2,4} packages' -f $Script:TierInfo[$t].Colour, $Script:TierInfo[$t].Label, $n) -ForegroundColor $Script:TierInfo[$t].Console
     }
@@ -871,7 +919,7 @@ function Save-Report($Rows, $Dev, [string]$DeviceDir) {
             PhoneSays = $_.Phone; ListsSay = $_.Lists; FinalReasoning = $_.Reason
             Partition = $(if ($f) { $f.Partition }); Privileged = $(if ($f) { $f.Privileged }); PlatformSigned = $(if ($f) { $f.PlatformSigned })
             HasIcon = $(if ($f) { $f.HasIcon }); Persistent = $(if ($f) { $f.Persistent }); AppId = $(if ($f) { $f.AppId })
-            UsedBy = $(if ($f) { $f.UsedBy -join ' ' }); PermHolders = $(if ($f) { $f.PermHolders -join ' ' }); Running = $(if ($f) { $f.Running })
+            UsedBy = $(if ($f) { $f.UsedBy -join ' ' }); PermHolders = $(if ($f) { $f.PermHolders -join ' ' }); Running = $(if ($f) { $f.Running }); InstallTime = $(if ($f) { $f.InstallTime }); Installer = $(if ($f) { $f.Installer })
         }
     } | ConvertTo-Csv -NoTypeInformation | Add-Content -Path $report -Encoding UTF8
     Write-Info "Full report: $report"
@@ -1005,20 +1053,20 @@ function Remove-Packages($Items, [string]$DeviceDir) {
 }
 
 function Invoke-Recommended($Rows, [string]$DeviceDir) {
-    $green = @($Rows | Where-Object { $_.Tier -eq 1 })
+    $green = @($Rows | Where-Object { $_.Tier -eq 1 -or ($_.Tier -eq 5 -and $_.AtSetup) })
     if ($green.Count -eq 0) {
         Write-Info 'Nothing rated GREEN on this phone.'
         Show-Notice "Nothing on this phone is rated GREEN (safe to remove without side effects).`n`nUse Custom to review the YELLOW packages: each one says what stops working if you remove it."
         return
     }
-    Write-Step "Recommended: $($green.Count) GREEN packages"
+    Write-Step "Recommended: $($green.Count) packages (GREEN, plus apps installed during setup)"
     foreach ($it in $green) { Write-Host ('  {0,-50} {1}' -f $it.Package, $it.Description) -ForegroundColor Green }
     $flagged = @($Rows | Where-Object { $_.Tier -eq 0 }).Count
     if ($flagged) { Write-Info "$flagged packages were flagged (phone and lists disagree, or no data) and will not be touched. See the report." }
     $apps = @($green | Where-Object { $_.UserApp })
     if ($Script:Gui) {
-        $legend = "All of these are GREEN: removing them breaks nothing else. Background junk is ticked. Everyday apps (YouTube, Chrome, Gmail, Drive, Meet, Lens, WhatsApp, Instagram and anything with an icon) are NOT ticked - tick any you don't want."
-        $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) GREEN packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend -NoMatchHint 'Recommended shows GREEN only. Go Back > Custom to search everything.')
+        $legend = "GREEN: removing them breaks nothing else. Background junk is ticked; everyday apps (YouTube, Chrome, Gmail, WhatsApp and anything with an icon) are NOT. BLUE: apps installed during phone setup (games and other preloads) - not ticked, as backup-restored apps arrive then too. Tick what you don't want."
+        $green = ConvertTo-FlatList (Select-Packages -Items $green -Title "HyperDebloat - Recommended ($($green.Count) packages)" -ActionText 'Remove selected' -PreselectBackground -Legend $legend -NoMatchHint 'Recommended shows GREEN and setup-installed apps only. Go Back > Custom to search everything.')
         if ($green.Count -eq 0) { Write-Info 'Back. Nothing was removed.'; return }
     }
     else {
@@ -1327,7 +1375,7 @@ function Invoke-Scan($Dev) {
     $rows = Get-Classification -Idx $idx -Sets $sets -Facts $facts
     Write-Summary $rows
     Save-Report -Rows $rows -Dev $Dev -DeviceDir $Script:DeviceDir
-    $parts = foreach ($t in @(1, 2, 3, 4, 0)) { "$(@($rows | Where-Object { $_.Tier -eq $t }).Count) $($Script:TierInfo[$t].Colour.ToLower())" }
+    $parts = foreach ($t in @(1, 2, 3, 4, 0, 5)) { "$(@($rows | Where-Object { $_.Tier -eq $t }).Count) $($Script:TierInfo[$t].Colour.ToLower())" }
     $Script:ScanSummary = "Last scan $(Get-Date -Format 'HH:mm'): " + ($parts -join ', ')
     $Script:NeedScan = $false
     return , $rows
